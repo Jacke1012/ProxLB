@@ -282,15 +282,33 @@ class Calculations:
                   be used for the next balancing action.
         """
         logger.debug("Starting: get_most_free_node.")
-        proxlb_data["meta"]["balancing"]["balance_next_node"] = ""
+        proxlb_data["meta"]["balancing"]["balance_next_node"] = None
 
-        # Filter and exclude nodes that are in maintenance mode
-        filtered_nodes = [node for node in proxlb_data["nodes"].values() if not node["maintenance"]]
+        # insure that we don't error out if "nodes" key is missing
+        nodes_dict = proxlb_data.get("nodes", {})
 
         # Filter and include nodes that given by a relationship between guest and node. This is only
         # used if the guest has a relationship to a node defined by "pin" tags.
         if len(guest_node_relation_list) > 0:
-            filtered_nodes = [node for node in proxlb_data["nodes"].values() if node["name"] in guest_node_relation_list]
+            filtered_nodes = [
+                node
+                for node in nodes_dict.values()
+                if node["name"] in guest_node_relation_list and not node["maintenance"]
+            ]
+        else:
+            # Filter and exclude nodes only that are in maintenance mode
+            filtered_nodes = [
+                node for node in nodes_dict.values() if not node["maintenance"]
+            ]
+
+        if not filtered_nodes:
+            # log an error if filtered_nodes is empty
+            logger.critical(
+                "No possible target nodes found for balancing after applying maintenance and relationship filters."
+            )
+            proxlb_data["meta"]["balancing"]["balance_reason"] = "resources"
+            proxlb_data["meta"]["balancing"]["balance_next_node"] = None
+            return None
 
         # Filter by the defined methods and modes for balancing
         method = proxlb_data["meta"]["balancing"].get("method", "memory")
@@ -298,30 +316,48 @@ class Calculations:
 
         if mode == "assigned":
             logger.debug(f"Get best node for balancing by assigned {method} resources.")
-            lowest_usage_node = min(filtered_nodes, key=lambda x: x[f"{method}_{mode}_percent"])
+            lowest_usage_node = min(
+                filtered_nodes, key=lambda x: x.get(f"{method}_{mode}_percent", 100)
+            )
 
         elif mode == "used":
             logger.debug(f"Get best node for balancing by used {method} resources.")
-            lowest_usage_node = min(filtered_nodes, key=lambda x: x[f"{method}_{mode}_percent"])
-
+            lowest_usage_node = min(
+                filtered_nodes, key=lambda x: x.get(f"{method}_{mode}_percent", 100)
+            )
         elif mode == "psi":
-            logger.debug(f"Get best node for balancing by pressure of {method} resources.")
-            lowest_usage_node = min(filtered_nodes, key=lambda x: x[f"{method}_pressure_full_spikes_percent"])
+            logger.debug(
+                f"Get best node for balancing by pressure of {method} resources."
+            )
+            lowest_usage_node = min(
+                filtered_nodes,
+                key=lambda x: x.get(f"{method}_pressure_full_spikes_percent", 100),
+            )
 
         else:
-            logger.critical(f"Unknown balancing mode: {mode} provided. Cannot get best node.")
+            logger.critical(
+                f"Unknown balancing mode: {mode} provided. Cannot get best node."
+            )
             sys.exit(1)
 
-        proxlb_data["meta"]["balancing"]["balance_reason"] = 'resources'
-        proxlb_data["meta"]["balancing"]["balance_next_node"] = lowest_usage_node["name"]
+        if not lowest_usage_node:
+            logger.critical("No suitable node found for balancing.")
+            proxlb_data["meta"]["balancing"]["balance_reason"] = "resources"
+            proxlb_data["meta"]["balancing"]["balance_next_node"] = None
+        else:
+            proxlb_data["meta"]["balancing"]["balance_reason"] = "resources"
+            proxlb_data["meta"]["balancing"]["balance_next_node"] = lowest_usage_node[
+                "name"
+            ]
 
         # If executed to simply get the best node for further usage, we return
         # the best node on stdout and gracefully exit here
         if return_node:
-            print(lowest_usage_node["name"])
+            print(lowest_usage_node.get("name", None))
             sys.exit(0)
 
         logger.debug("Finished: get_most_free_node.")
+        return lowest_usage_node
 
     @staticmethod
     def relocate_guests_on_maintenance_nodes(proxlb_data: Dict[str, Any]):

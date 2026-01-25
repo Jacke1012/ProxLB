@@ -1,2 +1,3 @@
 fixed:
   - Fix PSI based balancing which resulted in a Python KeyError (@gyptazy). [#420]
+  - Fix empty list of possible target nodes for balancing resulting in a Python KeyError (@archandha). [#24]
