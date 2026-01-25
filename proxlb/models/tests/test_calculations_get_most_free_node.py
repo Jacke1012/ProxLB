@@ -26,8 +26,7 @@ def test_get_most_free_node_crash_repro_fix24() -> None:
     result = Calculations.get_most_free_node(proxlb_data, "cpu", "avg")
 
     assert result is None, "Expected None when no nodes are available for balancing."
-    assert proxlb_data["meta"]["balancing"]["balance_next_node"] is None,
-        "Expected balance_next_node to be None."
+    assert proxlb_data["meta"]["balancing"]["balance_next_node"] is None, "Expected balance_next_node to be None."
 
 
 def test_min_usage_with_empty_nodes() -> None:
