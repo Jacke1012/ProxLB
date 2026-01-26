@@ -43,6 +43,6 @@ def test_min_usage_with_empty_nodes() -> None:
     node = Calculations.get_most_free_node(proxlb_data, return_node=False)
 
     assert node is None, "Expected None when no nodes are available."
-    assert proxlb_data["meta"]["balancing"][
-        "balance_next_node"
-    ] is None, "Expected balance_next_node to be None."
+    assert proxlb_data["meta"]["balancing"]["balance_next_node"] is None, "Expected balance_next_node to be None."
+
+    
