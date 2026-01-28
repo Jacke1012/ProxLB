@@ -196,7 +196,8 @@ class Calculations:
 
                 if proxlb_data["meta"]["balancing"].get(f"{method}_threshold", None):
                     threshold = proxlb_data["meta"]["balancing"].get(f"{method}_threshold")
-                    highest_usage_node = max(proxlb_data["nodes"].values(), key=lambda x: x[f"{method}_{mode}_percent"])
+                    # if the key isn't present, we assume 100% usage
+                    highest_usage_node = max(proxlb_data["nodes"].values(), key=lambda x: x.get(f"{method}_{mode}_percent", 100))
                     highest_node_value = highest_usage_node[f"{method}_{mode}_percent"]
 
                     if highest_node_value >= threshold:
@@ -214,7 +215,8 @@ class Calculations:
 
                 if proxlb_data["meta"]["balancing"].get(f"{method}_threshold", None):
                     threshold = proxlb_data["meta"]["balancing"].get(f"{method}_threshold")
-                    highest_usage_node = max(proxlb_data["nodes"].values(), key=lambda x: x[f"{method}_{mode}_percent"])
+                    # if the key isn't present, we assume 100% usage
+                    highest_usage_node = max(proxlb_data["nodes"].values(), key=lambda x: x.get(f"{method}_{mode}_percent", 100))
                     highest_node_value = highest_usage_node[f"{method}_{mode}_percent"]
 
                     if highest_node_value >= threshold:
@@ -282,15 +284,31 @@ class Calculations:
                   be used for the next balancing action.
         """
         logger.debug("Starting: get_most_free_node.")
-        proxlb_data["meta"]["balancing"]["balance_next_node"] = ""
+        proxlb_data["meta"]["balancing"]["balance_next_node"] = None
 
-        # Filter and exclude nodes that are in maintenance mode
-        filtered_nodes = [node for node in proxlb_data["nodes"].values() if not node["maintenance"]]
+        # insure that we don't error out if "nodes" key is missing
+        nodes_dict = proxlb_data.get("nodes", {})
 
         # Filter and include nodes that given by a relationship between guest and node. This is only
         # used if the guest has a relationship to a node defined by "pin" tags.
         if len(guest_node_relation_list) > 0:
-            filtered_nodes = [node for node in proxlb_data["nodes"].values() if node["name"] in guest_node_relation_list]
+            filtered_nodes = [
+                node
+                for node in nodes_dict.values()
+                if node["name"] in guest_node_relation_list and not node["maintenance"]
+            ]
+        else:
+            # Filter and exclude nodes only that are in maintenance mode
+            filtered_nodes = [
+                node for node in nodes_dict.values() if not node["maintenance"]
+            ]
+
+        if not filtered_nodes:
+            # log an error if filtered_nodes is empty
+            logger.critical("No possible target nodes found for balancing after applying maintenance and relationship filters.")
+            proxlb_data["meta"]["balancing"]["balance_reason"] = "resources"
+            proxlb_data["meta"]["balancing"]["balance_next_node"] = None
+            return None
 
         # Filter by the defined methods and modes for balancing
         method = proxlb_data["meta"]["balancing"].get("method", "memory")
@@ -298,30 +316,47 @@ class Calculations:
 
         if mode == "assigned":
             logger.debug(f"Get best node for balancing by assigned {method} resources.")
-            lowest_usage_node = min(filtered_nodes, key=lambda x: x[f"{method}_{mode}_percent"])
+            lowest_usage_node = min(
+                filtered_nodes, key=lambda x: x.get(f"{method}_{mode}_percent", 100)
+            )
 
         elif mode == "used":
             logger.debug(f"Get best node for balancing by used {method} resources.")
-            lowest_usage_node = min(filtered_nodes, key=lambda x: x[f"{method}_{mode}_percent"])
-
+            lowest_usage_node = min(
+                filtered_nodes, key=lambda x: x.get(f"{method}_{mode}_percent", 100)
+            )
         elif mode == "psi":
-            logger.debug(f"Get best node for balancing by pressure of {method} resources.")
-            lowest_usage_node = min(filtered_nodes, key=lambda x: x[f"{method}_pressure_full_spikes_percent"])
+            logger.debug(
+                f"Get best node for balancing by pressure of {method} resources."
+            )
+            lowest_usage_node = min(
+                filtered_nodes,
+                key=lambda x: x.get(f"{method}_pressure_full_spikes_percent", 100),
+            )
 
         else:
-            logger.critical(f"Unknown balancing mode: {mode} provided. Cannot get best node.")
+            logger.critical(
+                f"Unknown balancing mode: {mode} provided. Cannot get best node."
+            )
             sys.exit(1)
 
-        proxlb_data["meta"]["balancing"]["balance_reason"] = 'resources'
-        proxlb_data["meta"]["balancing"]["balance_next_node"] = lowest_usage_node["name"]
+        if not lowest_usage_node:
+            logger.critical("No suitable node found for balancing.")
+            proxlb_data["meta"]["balancing"]["balance_reason"] = "resources"
+            proxlb_data["meta"]["balancing"]["balance_next_node"] = None
+        else:
+            proxlb_data["meta"]["balancing"]["balance_reason"] = "resources"
+            proxlb_data["meta"]["balancing"]["balance_next_node"] = lowest_usage_node["name"]
+            logger.debug(f"Best node for balancing is: {lowest_usage_node['name']}.")
 
         # If executed to simply get the best node for further usage, we return
         # the best node on stdout and gracefully exit here
         if return_node:
-            print(lowest_usage_node["name"])
+            print(lowest_usage_node.get("name", None))
             sys.exit(0)
 
         logger.debug("Finished: get_most_free_node.")
+        return lowest_usage_node
 
     @staticmethod
     def relocate_guests_on_maintenance_nodes(proxlb_data: Dict[str, Any]):
@@ -347,8 +382,10 @@ class Calculations:
             # Update the node with the most free nodes which is
             # not in a maintenance
             proxlb_data["meta"]["balancing"]["balance_next_guest"] = guest_name
-            Calculations.get_most_free_node(proxlb_data)
-            Calculations.update_node_resources(proxlb_data)
+            if Calculations.get_most_free_node(proxlb_data):
+                Calculations.update_node_resources(proxlb_data)
+            else:
+                logger.warning(f"Warning: Could not find a suitable node to relocate guest {guest_name} from a maintenance node.")
             logger.warning(f"Warning: Balancing may not be perfect because guest {guest_name} was located on a node which is in maintenance mode.")
 
         logger.debug("Finished: relocate_guests_on_maintenance_nodes.")
@@ -430,7 +467,10 @@ class Calculations:
                         break
 
                     if not Calculations.validate_node_resources(proxlb_data, guest_name):
-                        logger.warning(f"Skipping relocation of guest {guest_name} due to insufficient resources on target node {proxlb_data['meta']['balancing']['balance_next_node']}. This might affect affinity group {group_name}.")
+                        if proxlb_data['meta']['balancing'].get('balance_next_node', None) is None:
+                            logger.warning(f"Skipping relocation of guest {guest_name} due to no target node defined. This might affect affinity group {group_name}.")
+                        else:
+                            logger.warning(f"Skipping relocation of guest {guest_name} due to insufficient resources on target node {proxlb_data['meta']['balancing']['balance_next_node']}. This might affect affinity group {group_name}.")
                         continue
 
                     if mode == 'psi':
@@ -517,11 +557,11 @@ class Calculations:
         Validates and assigns guests to nodes based on defined relationships based on tags.
 
         Parameters:
-        proxlb_data (Dict[str, Any]): The data holding all content of all objects.
-        guest_name (str): The name of the guest to be validated and assigned a node.
+            proxlb_data (Dict[str, Any]): The data holding all content of all objects.
+            guest_name (str): The name of the guest to be validated and assigned a node.
 
         Returns:
-        None
+            None
         """
         logger.debug("Starting: val_node_relationships.")
         proxlb_data["guests"][guest_name]["processed"] = True
@@ -540,7 +580,8 @@ class Calculations:
                 logger.debug(f"Guest '{guest_name}' has non-strict node relationships defined. Prefering nodes in the relationship list for pinning.")
                 Calculations.get_most_free_node(proxlb_data)
                 most_free_node = proxlb_data["meta"]["balancing"]["balance_next_node"]
-                guest_node_relation_list.append(most_free_node)
+                if most_free_node:
+                    guest_node_relation_list.append(most_free_node)
 
             # Get the most free node from the relationship list, or the most free node overall
             Calculations.get_most_free_node(proxlb_data, False, guest_node_relation_list)
@@ -563,8 +604,8 @@ class Calculations:
         is moved from one node to another.
 
         Parameters:
-        proxlb_data (dict): A dictionary containing information about the nodes and
-        guests, including their resource allocations and usage.
+             proxlb_data (dict): A dictionary containing information about the nodes and
+                guests, including their resource allocations and usage.
 
         The function performs the following steps:
         1. Retrieves the guest name, current node, and target node from the provided data.
@@ -576,14 +617,19 @@ class Calculations:
            of the guest from the current node to the target node.
         """
         logger.debug("Starting: update_node_resources.")
-        guest_name = proxlb_data["meta"]["balancing"]["balance_next_guest"]
+        guest_name = proxlb_data["meta"]["balancing"].get("balance_next_guest", None)
 
-        if guest_name == "":
+        # with fix #24 an empty guest name will be None, but maybe there are still cases with empty strings
+        if guest_name is None or guest_name == "":
             logger.debug("No guest defined to update node resources for.")
             return
 
         node_current = proxlb_data["guests"][guest_name]["node_current"]
-        node_target = proxlb_data["meta"]["balancing"]["balance_next_node"]
+        node_target = proxlb_data["meta"]["balancing"].get("balance_next_node", None)
+
+        if node_target is None:
+            logger.debug(f"No target node defined to update node resources for guest {guest_name}.")
+            return
 
         # Update resources for the target node by the moved guest resources
         # Add assigned resources to the target node
@@ -788,9 +834,14 @@ class Calculations:
             guest_name (str): The name of the guest to validate resources for
         Returns:
             bool: True if the target node has sufficient resources, False otherwise
+                  or if there is no target node defined.
         """
         logger.debug("Starting: validate_node_resources.")
         node_target = proxlb_data["meta"]["balancing"]["balance_next_node"]
+
+        if node_target is None:
+            logger.debug(f"No target node defined to validate node resources for guest {guest_name}.")
+            return False
 
         node_memory_free = proxlb_data["nodes"][node_target]["memory_free"]
         node_cpu_free = proxlb_data["nodes"][node_target]["cpu_free"]
