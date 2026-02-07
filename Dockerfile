@@ -10,13 +10,18 @@ LABEL org.label-schema.url="https://proxlb.de"
 LABEL org.label-schema.vcs-url="https://github.com/gyptazy/ProxLB"
 
 # --- Step 1 (root): system deps, user, dirs ---
-RUN apk add --no-cache python3 py3-pip \
+RUN apk add --no-cache python3 py3-pip ca-certificates \
   && addgroup -S plb \
   && adduser -S -G plb -h /home/plb plb \
   && mkdir -p /app/conf /opt/venv \
   && chown -R plb:plb /app /home/plb /opt/venv
 
 WORKDIR /app
+
+COPY certs/*.crt /usr/local/share/ca-certificates/
+
+RUN update-ca-certificates
+
 
 # Copy only requirements first for better layer caching
 COPY --chown=plb:plb requirements.txt /app/requirements.txt
